@@ -40,7 +40,8 @@ def ContinuousCascadeSphere(
         omega_cl, field_cl,
         do_lagrangian_map,
         needlet_fwhms=[300., 120., 60., 30., 15., 7.5, 5.],
-        sigma_param=0.2, c_param=5.0, params=None):
+        sigma_param=0.2, c_param=5.0, params=None, large_alm=None, large_c_param=0.5,
+        mod_map=None):
     """
     Builds the multifractal scalar potential scale-by-scale.
     If do_lagrangian_map is True, tracks and returns advected grid coordinates.
@@ -56,6 +57,8 @@ def ContinuousCascadeSphere(
         sigma_param (float): (lambda^2), the multifractal parameter
         c_param (float): Advection strength parameter
         params (tuple): (s_l, s_m, theta_deg) anisotropy transformation parameters
+        large_alm (np.ndarray): a_lm for the large-scale(s). If provided, additionally advects the field by the large-scales
+        large_c_param (float): Advection strength parameter from the large-scales
 
     Returns:
         (np.ndarray, np.ndarray): Advected grid coordinates d_theta, d_phi
@@ -83,10 +86,33 @@ def ContinuousCascadeSphere(
     om_cl = omega_cl.copy()
     om_cl[np.isnan(om_cl)] = 0.
     om_cl[:2] = 0.
+
+    u_theta_large = np.zeros(npix)
+    u_phi_large = np.zeros(npix)
+    tau_large = 0.
+    if large_alm is not None:
+        large_map = hp.alm2map(large_alm, NSIDE)
+        if mod_map is None:
+            mod_map = np.ones_like(large_map)
+        large_map = large_map/mod_map
+        large_alm = hp.map2alm(large_map)
+        _, v_theta_large, v_phi_sin_large = hp.alm2map_der1(large_alm, NSIDE)
+        u_theta_large = v_phi_sin_large
+        u_phi_large = -v_theta_large
+        # Normalize large-scale velocity independently
+        v_mag_large = np.sqrt(u_theta_large**2 + u_phi_large**2)
+        max_v_large = np.max(v_mag_large)
+        if max_v_large > 0:
+            # Divide by num_bands so the total large-scale sweep across the 
+            # whole cascade generation equals exactly c_large_param radians.
+            weight_sum = np.sum(h_l[0])
+            l_mid = np.sum(l * h_l[0]) / weight_sum
+            tau_large = large_c_param / max_v_large / l_mid
     
     for j in range(num_bands):
         weight_sum = np.sum(h_l[j])
         l_mid = np.sum(l * h_l[j]) / weight_sum
+        print('Synthesizing band:', l_mid)
         
         # A. Sample next level of the intensity process (Omega)
         # Generate white noise, filter by needlet, and accumulate
@@ -110,38 +136,43 @@ def ContinuousCascadeSphere(
         
         # D. Lagrangian Advection Step
         if do_lagrangian_map:
-            # Take curl of the ACCUMULATED potential (as per pseudocode v <- curl(a))
             A_alm_current = hp.map2alm(A_map, lmax=l_max)
             _, v_theta, v_phi_sin = hp.alm2map_der1(A_alm_current, NSIDE)
-            
             u_theta = v_phi_sin
             u_phi = -v_theta
-            
-            # Advect coordinates proportional to velocity / max(||v||)
             v_mag = np.sqrt(u_theta**2 + u_phi**2)
             max_v = np.max(v_mag)
             
             if max_v > 0:
                 tau = c_param / max_v / l_mid
-                theta_disp += tau * u_theta
-                phi_disp += tau * u_phi / np.maximum(np.sin(theta + theta_disp), 1e-15)
+                
+                # Update displacements
+                d_theta = (tau * u_theta) + (tau_large * u_theta_large)
+                curr_theta = theta + theta_disp
+                d_phi = ((tau * u_phi) + (tau_large * u_phi_large)) / np.maximum(np.sin(curr_theta), 1e-5)
+                
+                theta_disp += d_theta
+                phi_disp += d_phi
+
+                temp_theta = theta + theta_disp
+                temp_phi = phi + phi_disp
+
+                np_cross = temp_theta < 0
+                temp_theta[np_cross] = -temp_theta[np_cross]
+                temp_phi[np_cross] += np.pi
+
+                sp_cross = temp_theta > np.pi
+                temp_theta[sp_cross] = 2.0 * np.pi - temp_theta[sp_cross]
+                temp_phi[sp_cross] += np.pi
+
+                temp_phi = temp_phi % (2.0 * np.pi)
+
+                # Store back wrapped net displacements
+                theta_disp = temp_theta - theta
+                phi_disp = temp_phi - phi
 
     if do_lagrangian_map:
-        # Return displacements
-        # Resolve Spherical Boundaries for advected coordinates
-        theta_new = theta + theta_disp
-        phi_new = phi + phi_disp
-        
-        np_cross = theta_new < 0
-        theta_new[np_cross] = -theta_new[np_cross]
-        phi_new[np_cross] += np.pi
-        
-        sp_cross = theta_new > np.pi
-        theta_new[sp_cross] = 2 * np.pi - theta_new[sp_cross]
-        phi_new[sp_cross] += np.pi
-        
-        phi_new = phi_new % (2 * np.pi)
-        return theta_new, phi_new
+        return theta + theta_disp, (phi + phi_disp) % (2.0 * np.pi)
     else:
         # Return scalar field
         return A_map
@@ -164,7 +195,8 @@ def whiten_alm(alm):
 def get_alm(
         l_max, nside,
         base, base_cl, base_om_cl, base_sigma,
-        prop, prop_cl, prop_om_cl, prop_sigma, prop_c):
+        prop, prop_cl, prop_om_cl, prop_sigma, prop_c,
+        large_alm=None, large_c_param=0.5, mod_map=None):
     """get_alms()
     
     Generates a_lm with the given parameters. Then whitens the a_lm.
@@ -184,17 +216,20 @@ def get_alm(
         prop_om_cl (np.ndarray): C_ell of the displacement field multiplicative noise
         prop_sigma (float): Displacement field multifractal parameter
         prop_c (float): Displacement field advection strength
+
+        large_alm (np.ndarray): a_lm for the large-scale(s). If provided, additionally advects the field by the large-scales
+        large_c_param (float): 
     
     Returns:
         np.ndarray: single whitened realizations of the field with given parameters
     """
     ## We need the same propagation for each field
     if prop == 'isotropic':
-        theta, phi = ContinuousCascadeSphere(l_max, nside, prop_om_cl, prop_cl, True, sigma_param=prop_sigma, c_param=prop_c)
+        theta, phi = ContinuousCascadeSphere(l_max, nside, prop_om_cl, prop_cl, True, sigma_param=prop_sigma, c_param=prop_c, large_alm=large_alm, large_c_param=large_c_param, mod_map=mod_map)
     elif prop == 'meridional':
-        theta, phi = ContinuousCascadeSphere(l_max, nside, prop_om_cl, prop_cl, True, sigma_param=prop_sigma, c_param=prop_c, params=(20.0, 1.0, 45.0))
+        theta, phi = ContinuousCascadeSphere(l_max, nside, prop_om_cl, prop_cl, True, sigma_param=prop_sigma, c_param=prop_c, params=(10.0, 1.0, 45.0), large_alm=large_alm, large_c_param=large_c_param, mod_map=mod_map)
     elif prop == 'zonal':
-        theta, phi = ContinuousCascadeSphere(l_max, nside, prop_om_cl, prop_cl, True, sigma_param=prop_sigma, c_param=prop_c, params=(1.0, 10.0, 0.0))
+        theta, phi = ContinuousCascadeSphere(l_max, nside, prop_om_cl, prop_cl, True, sigma_param=prop_sigma, c_param=prop_c, params=(1.0, 10.0, 0.0), large_alm=large_alm, large_c_param=large_c_param, mod_map=mod_map)
     else:
         raise NotImplementedError('Have not implemented other anisotropies')
 
@@ -202,7 +237,7 @@ def get_alm(
     if base == 'isotropic':
         map = ContinuousCascadeSphere(l_max, nside, base_om_cl, base_cl, False, sigma_param=base_sigma)
     elif base == 'meridional':
-        map = ContinuousCascadeSphere(l_max, nside, base_om_cl, base_cl, False, sigma_param=base_sigma, params=(20.0, 1.0, 45.0))
+        map = ContinuousCascadeSphere(l_max, nside, base_om_cl, base_cl, False, sigma_param=base_sigma, params=(10.0, 1.0, 45.0))
     elif base == 'zonal':
         map = ContinuousCascadeSphere(l_max, nside, base_om_cl, base_cl, False, sigma_param=base_sigma, params=(1.0, 10.0, 0.0))
     else:
@@ -229,14 +264,49 @@ def make_iqu(
     for i in range(3):
         ## Assume parameters are equal for displacement map and base map
         param_dict = ([t_delta_params, e_delta_params, b_delta_params])[i]
-        target_cl = param_dict['cl_target']
-        noise_cl = param_dict['cl_noise']
-        c_param = param_dict['c']
-        lambda_param = param_dict['lambda']
-        ani_str = param_dict['anisotropy']
+        if isinstance(param_dict, tuple):
+            param_dict_galplane = param_dict[1]
+            param_dict_sky = param_dict[0]
+        else:
+            param_dict_galplane = None
+            param_dict_sky = param_dict
 
+        target_cl = param_dict_sky['cl_target']
+        noise_cl = param_dict_sky['cl_noise']
+        c_param = param_dict_sky.get('c', None)
+        lambda_param = param_dict_sky.get('lambda', None)
+        ani_str = param_dict_sky.get('anisotropy', 'isotropic')
+        large_alm = param_dict_sky.get('large_alm', None)
+        large_c_param = param_dict_sky.get('large_c_param', 0.00001)
+        mod_map = param_dict_sky.get('mod_map', None)
+        if c_param is None:
+            print('c not provided, defaulting to 0')
+            c_param = 0.00001
+        if lambda_param is None:
+            print('lambda not provided, defaulting to 0')
+            lambda_param = 0.00001
         np.random.seed(seeds[i])
-        alm = get_alm(l_max, nside, ani_str, target_cl, noise_cl, lambda_param**2, ani_str, target_cl, noise_cl, lambda_param**2, c_param)
+        alm = get_alm(l_max, nside, ani_str, target_cl, noise_cl, lambda_param**2, ani_str, target_cl, noise_cl, lambda_param**2, c_param, large_alm=large_alm, large_c_param=large_c_param, mod_map=mod_map)
+
+        if param_dict_galplane is not None:
+            target_cl = param_dict_galplane['cl_target']
+            noise_cl = param_dict_galplane['cl_noise']
+            c_param = param_dict_galplane.get('c', None)
+            lambda_param = param_dict_galplane.get('lambda', None)
+            ani_str = param_dict_galplane.get('anisotropy', 'isotropic')
+            large_alm = param_dict_galplane.get('large_alm', None)
+            large_c_param = param_dict_galplane.get('large_c_param', 0.00001)
+            mod_map = param_dict_galplane.get('mod_map', None)
+            if c_param is None:
+                print('c not provided, defaulting to 0')
+                c_param = 0.00001
+            if lambda_param is None:
+                print('lambda not provided, defaulting to 0')
+                lambda_param = 0.00001
+            np.random.seed(seeds[i])
+            alm2 = get_alm(l_max, nside, ani_str, target_cl, noise_cl, lambda_param**2, ani_str, target_cl, noise_cl, lambda_param**2, c_param, large_alm=large_alm, large_c_param=large_c_param, mod_map=mod_map)
+            alm = blur_alms(alm2, alm)
+
         alms.append(alm)
 
     ## Use analytical solution for zero tb, eb correlations
@@ -261,11 +331,10 @@ def make_IQU_ref(i_delta, q_delta, u_delta, nside=512):
     I_ref, Q_ref, U_ref, _ = sky6.components[0].modulate_small_scales(np.array([i_delta, q_delta, u_delta]), 3*nside-1, (4,5,6))
     return I_ref, Q_ref, U_ref
 
-def get_apodized_mask(nside=512):
+def get_apodized_mask(nside=512, mask_idx=3):
     """Returns apodized mask for Galactic plane synthesis"""
-    masks = hp.read_map('HFI_Mask_GalPlane-apo2_2048_R2.00.fits', nest=True, hdu=1, field=(0,1,2,3,4,5,6,7))
-    masks = hp.ud_grade(masks, nside, order_in='NEST', order_out='RING')
-    mask_apodized = masks[3]
+    masks = hp.read_map('HFI_Mask_GalPlane-apo2_2048_R2.00.fits', nest=True, hdu=1, field=mask_idx)
+    mask_apodized = hp.ud_grade(masks, nside, order_in='NEST', order_out='RING')
     return mask_apodized
 
 def blur_maps(map1, map2, mask_apodized=None, nside=512):

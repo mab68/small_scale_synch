@@ -7,6 +7,14 @@ import matplotlib.pyplot as plt
 
 from astropy import wcs
 
+bbox_props = dict(
+    boxstyle="square,pad=0.3",  # "square" ensures sharp corners; pad adjusts internal spacing
+    facecolor="white",          # White background fill
+    edgecolor="black",          # Black border line
+    linewidth=1.5,              # Border thickness
+    alpha=0.9                   # Slightly transparent so grid lines don't completely vanish
+)
+
 def modify_rc():
     mpl.rcParams['figure.dpi'] = 250
     mpl.rc('text', usetex=True)
