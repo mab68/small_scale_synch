@@ -24,8 +24,11 @@ def modify_rc():
     mpl.rc('font', family='serif', serif='Computer Modern', size=8)
 
 # NOTE: COMMENT THIS OUT IF YOU DON'T HAVE LATEX CONFIGURED FOR MATPLOTLIB
-modify_rc()
-modify_rc()
+try:
+    modify_rc()
+    modify_rc()
+except:
+    pass
 
 def pretty_axes(axx):
     axx.yaxis.set_ticks_position('both')
@@ -111,3 +114,20 @@ def get_patch_data(field, l_center, b_center, size_deg=32., res_arcmin=4.94):
     l_edges = np.where(l_edges < 0, l_edges + 360, l_edges)
 
     return l_edges, b_edges, grid_data
+
+def make_hist(map, log=False, range=None, bin_num=200, rescale=False, density=False):
+    """Return histogram of observation at frequency f"""
+    if rescale:
+        map = map.copy() / (2.*np.nanstd(map))
+
+    if range is None:
+        range = (np.nanmin(map), np.nanmax(map))
+
+    if log:
+        bins = np.exp(np.linspace(np.log(range[0]), np.log(range[1]), bin_num))
+        range = None
+    else:
+        bins = bin_num
+
+    h, e = np.histogram(map, bins=bins, density=density, range=range)
+    return h, e

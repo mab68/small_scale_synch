@@ -59,6 +59,7 @@ def ContinuousCascadeSphere(
         params (tuple): (s_l, s_m, theta_deg) anisotropy transformation parameters
         large_alm (np.ndarray): a_lm for the large-scale(s). If provided, additionally advects the field by the large-scales
         large_c_param (float): Advection strength parameter from the large-scales
+        mod_map (np.ndarray): Modulation map; rescales the large-scale field
 
     Returns:
         (np.ndarray, np.ndarray): Advected grid coordinates d_theta, d_phi
@@ -69,7 +70,7 @@ def ContinuousCascadeSphere(
     omega = np.zeros(npix)  # Intensity process (intermittency)
     A_map = np.zeros(npix)  # Accumulated scalar potential
 
-    # Needlet/scale-dependence
+    # Bband-pass filters for scale-dependence
     h_l = get_needlets(l_max, needlet_fwhms)
     num_bands = len(needlet_fwhms)
     
@@ -87,6 +88,7 @@ def ContinuousCascadeSphere(
     om_cl[np.isnan(om_cl)] = 0.
     om_cl[:2] = 0.
 
+    ## Generate deterministic/large-scale advection
     u_theta_large = np.zeros(npix)
     u_phi_large = np.zeros(npix)
     tau_large = 0.
@@ -94,6 +96,7 @@ def ContinuousCascadeSphere(
         large_map = hp.alm2map(large_alm, NSIDE)
         if mod_map is None:
             mod_map = np.ones_like(large_map)
+        ## De-modulate map
         large_map = large_map/mod_map
         large_alm = hp.map2alm(large_map)
         _, v_theta_large, v_phi_sin_large = hp.alm2map_der1(large_alm, NSIDE)
@@ -105,6 +108,7 @@ def ContinuousCascadeSphere(
         if max_v_large > 0:
             # Divide by num_bands so the total large-scale sweep across the 
             # whole cascade generation equals exactly c_large_param radians.
+            ## Assume the large-scale is only in the 1st band-pass
             weight_sum = np.sum(h_l[0])
             l_mid = np.sum(l * h_l[0]) / weight_sum
             tau_large = large_c_param / max_v_large / l_mid
@@ -218,7 +222,8 @@ def get_alm(
         prop_c (float): Displacement field advection strength
 
         large_alm (np.ndarray): a_lm for the large-scale(s). If provided, additionally advects the field by the large-scales
-        large_c_param (float): 
+        large_c_param (float): Advection strength parameter from the large-scales
+        mod_map (np.ndarray): Modulation map; rescales the large-scale field
     
     Returns:
         np.ndarray: single whitened realizations of the field with given parameters
@@ -259,6 +264,20 @@ def make_iqu(
 
     Make small-scale polarization tensor maps i_delta, q_delta, u_delta.
     
+    Args:
+        l_max (int): Maximum ell
+        nside (int): HEALPIX N_side
+        t_delta_params (dict): Dictionary of t_delta parameters
+        e_delta_params (dict): Dictionary of e_delta parameters
+        b_delta_params (dict): Dictionary of b_delta parameters
+        cl_tt (np.ndarray): Target power spectrum for tt
+        cl_ee (np.ndarray): Target power spectrum for ee
+        cl_bb (np.ndarray): Target power spectrum for bb
+        cl_te (np.ndarray): Target power spectrum for te
+        seeds (tuple): Random seeds for t_delta,e_delta,b_delta initial fields
+
+    Returns:
+        (np.ndarray, np.ndarray, np.ndarray): i_delta, q_delta, u_delta maps
     """
     alms = []
     for i in range(3):
